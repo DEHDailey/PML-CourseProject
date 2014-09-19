@@ -1,0 +1,161 @@
+---
+title: "CourseProjectWriteup"
+author: "DEHDailey"
+date: "Wednesday, September 17, 2014"
+output: html_document
+---
+
+```{r, DownloadData, eval=FALSE, echo=FALSE}
+## Code section marked as eval=FALSE after running once to save data files to disk
+download.file( url='https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv',
+               destfile = 'pml-training.csv' )
+download.file( url='https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv',
+               destfile = 'pml-testing.csv' )
+```
+
+In this project, the goal is to develop a machine-learning model using measured body movements to predict whether a weightlifter is performing a lift correctly (class A) or incorrectly in one of four different ways (classes B though E).  The data and its original discussion is from:
+
+- Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+- Read more: http://groupware.les.inf.puc-rio.br/har#ixzz3DdmMtr5S
+
+After having downloaded the data files into the current working directory, load the training and testing data into the workspace.
+```{r LoadData, cache=TRUE}
+training <- read.csv( 'pml-training.csv', stringsAsFactors=FALSE )
+testing  <- read.csv( 'pml-testing.csv' , stringsAsFactors=FALSE )
+```
+
+### Exploring & Cleaning the Data
+
+The training data consists of `r nrow( training )` observations of data from accelerometers worn by individuals performing correct and incorrect weightlifting techniques.  The accelerometers were placed in four locations: on the weightlifter's belt, forearm, and (upper) arm, as well as on the dumbbell being lifted.  Up to 1500 measurements were collected during each minute of observation.
+
+Exploratory analysis indicates that several measurement variables have been read in as character instead of numeric.  These are caused by divide-by-zero errors in the original data file.  This can be fixed with a combination of `gsub` and `as.numeric` operations.  By writing them into a function, the same operations can later be applied to the testing data.
+
+```{r MakeNumericVariables}
+removeDivByZero <- function( someDataSet ) {
+  beltVars     <- grep( '_belt',     names( someDataSet ), value=TRUE  )
+  armVars      <- grep( '_arm',      names( someDataSet ), value=TRUE  )
+  dumbbellVars <- grep( '_dumbbell', names( someDataSet ), value=TRUE )
+  forearmVars  <- grep( '_forearm',  names( someDataSet ), value=TRUE )
+  measureVars <- c( beltVars, armVars, dumbbellVars, forearmVars )
+  for( mm in measureVars ) {
+    if( class( someDataSet[, mm ] ) == 'character' ){
+      someDataSet[, mm ] <- gsub( '#DIV/0!', '', someDataSet[, mm ] )
+      someDataSet[, mm ] <- as.numeric( someDataSet[, mm ] )
+    }
+  }
+  return( someDataSet )
+}
+training <- removeDivByZero( training )
+```
+The goal is to use accelerometer data to predict the quality of the exercise.  Several variables in the data set will not be useful in the prediction model; those variables are removed from the prediction model.  Also note that several dozen accelerometer variables have missing data for 97% or more of the observations; all other variables have complete data.  Prediction models don't like large amounts (or sometimes any amount) of missing data in the predictors.  The following code includes the removal of variables with any number of missing values.
+
+```{r ModelVariables}
+modelVars <- setdiff( names( training ), 
+                      c( 'X', 'user_name', 
+                         grep( 'timestamp', names( training ), value=TRUE ),
+                         'new_window', 'num_window' ) )
+
+## Also, remove variables with any missing values (all variables are either
+## complete or have very large proportions of missing data)
+modelVars <- 
+  setdiff( modelVars, 
+           names( which( 
+             apply( training[, modelVars], 2, function ( . ) any( is.na(. ) ) ) ) ) )
+
+## The predictors do not include the outcome variable-- this will be very useful later
+predictorVars <- setdiff( modelVars, 'classe' )
+```
+
+A random forest can be a useful tool for
+
+```{r Library, echo=FALSE}
+suppressWarnings( suppressPackageStartupMessages( library( randomForest ) ) )
+```
+
+```{r MakeRandomForest, cache=TRUE}
+# Matrix of just the predictor variables from the training set
+trainingPredictors <- training[, predictorVars ]
+
+set.seed( 97531 )
+## Using default values for randomForest() from the randomForest package
+## Note: 500 trees in the forest
+randForest1 <- randomForest( x = trainingPredictors,
+                             y = as.factor( training$classe ) )
+
+```
+
+### Out-of-sample error estimate
+
+The out-of-sample error estimate is a estimate of the proportion of new (test set) cases that will be misclassified by the model when the prediction model is applied to those new cases.
+
+For the _randomForest_ algorithm, the proper out-of-sample error is called the "out-of-bag (oob) error estimate."  As described by the original authors of random forests (see http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr):
+
+> In random forests, there is no need for cross-validation or a separate test set to get an unbiased estimate of the test set error. It is estimated internally, during the run.
+
+For a specific tree in the forest, the oob cases are those that were not included in the bootstrap resample of the training set for the creation of that tree.  After the tree is created, the oob cases (approximately one-third of the complete training set) are dropped down through the tree, and the actual classification of the oob case is compared to its prediction.  Each time an oob case is misclassified, the error rate goes up.
+
+The summary of the _randForest1_ model (printed below) indicates the OOB estimate of the error rate will be 0.29%.  According to this estimate, approximately 3 out of every 1,000 new cases will be misclassified.
+
+```{r RFSummary, echo=FALSE, comment=''}
+print( randForest1 )
+```
+
+```{r ErrorRatePlot, fig.height=7, fig.width=7}
+## Warnings are generated for a handful of error rates of zero when we use a log scale
+suppressWarnings( 
+  pp <- plot( randForest1, log='y', lwd=c( 3, rep( 1, 5 ) ), lty='solid',
+            main='Proportion of misclassified cases for randForest1',
+            yaxt='n' )
+  )
+axis( side=2, at=c( 0.001, 0.01, 0.1 ), las=2 )
+abline( h = pp[ nrow( pp ), 1 ], col='gray', lwd=2 )
+legend( 'topright', legend=colnames( pp ), 
+        col=1:6, lwd=c( 3, rep( 1, 5 ) ), lty='solid' )
+```
+
+The misclassification rates of the random forest model are presented in the figure above, as a function of the number of trees included in the forest.  The errors on the vertical (logarithmic) scale are presented as proportions, so a values of 0.100 is a misclassification rate of 10%.
+
+The trace of the OOB misclassification rate is marked with a heavier line, and can be seen to be some sort of average of the misclassification rates for the individual classes.  Classifications into class A (correct technique) are visibly better (lower error) than classifications into any of the classes for incorrect techniques.
+
+A horizontal line has been added at the final OOB error rate considering all 500 trees in the forest.  Note that the trace of the OOB error rate approaches this line beginning when there are about 200 trees in the forest.  In future work, it may be computationally worthwhile to generate a forest with fewer than the default number of trees.
+
+### Variable importance
+
+Because random forests are collections of classification (or regression) trees, each of which can use different sets of variables to achieve a classification prediction, the random forests are often difficult to interpret.  Which variables contribute to the decision to classify a case as class A versus class B versus class C, and so on?
+
+
+```{r VariableImportance, fig.height=7, fig.width=7, echo=FALSE}
+varImpPlot( randForest1, cex=0.8, main='Variable importance for randForest1' )
+```
+
+The variable importance dotchart, shown above, reveals which variables provide the greatest predictive value within the random forest.  Here, we see that the three variables related to the movement of the sensor placed on the weightlifter's belt are among the top five most important variables.  This makes sense because one-- and only one-- of the incorrect techniques involved throwing the hips to the front.  The position of the belt sensor **should** be an important variable in distinguishing at least between that incorrect technique and all the other techniques.
+
+This dotchart, like a scree plot for principal components, also gives a sense of which groups of variables "go together".  The top 30 variables are listed here, and it's not until the bottom half of this list that we start to see information from sensors on the (upper) arm.  Again, this makes sense, because only one incorrect technique (class B) would involve unique movement of the upper arm.  The correct technique and the other three incorrect techniques all use the same movements of the upper arm.
+
+### Applying the random forest to testing data
+
+To apply the random forest to the testing data, first process the testing data in the same way as the training data, then use the model to predict outcomes for the testing data.
+
+```{r ProcessTestingData}
+testing <- removeDivByZero( testing )
+testingPredictors <- testing[, predictorVars ]
+
+testingPredictions <- predict( randForest1, newdata=testingPredictors )
+```
+
+Using code supplied by the examiners, write the predictions to individual files to submit them for review.
+
+```{r WriteAnswers, eval=FALSE}
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+ 
+pml_write_files( testingPredictions )
+
+```
+
